@@ -1255,4 +1255,68 @@ export const providerPresets: ProviderPreset[] = [
     icon: "aws",
     iconColor: "#FF9900",
   },
+  // === OpenCode Zen Presets ===
+  {
+    name: "OpenCode Zen (Chat)",
+    websiteUrl: "https://opencode.ai/zen",
+    apiKeyUrl: "https://opencode.ai/zen",
+    settingsConfig: {
+      env: {
+        ANTHROPIC_BASE_URL: "https://opencode.ai/zen/v1",
+        ANTHROPIC_AUTH_TOKEN: "",
+        ANTHROPIC_MODEL: "deepseek-v4-flash-free",
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: "deepseek-v4-flash-free",
+        ANTHROPIC_DEFAULT_SONNET_MODEL: "deepseek-v4-pro",
+        ANTHROPIC_DEFAULT_OPUS_MODEL: "deepseek-v4-pro",
+      },
+    },
+    category: "aggregator",
+    apiFormat: "openai_chat",
+    icon: "opencode",
+    iconColor: "#8B5CF6",
+  },
+  {
+    name: "OpenCode Zen (Messages)",
+    websiteUrl: "https://opencode.ai/zen",
+    apiKeyUrl: "https://opencode.ai/zen",
+    settingsConfig: {
+      env: {
+        ANTHROPIC_BASE_URL: "https://opencode.ai/zen/v1",
+        ANTHROPIC_AUTH_TOKEN: "",
+        ANTHROPIC_MODEL: "claude-sonnet-4-6",
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: "claude-haiku-4-5",
+        ANTHROPIC_DEFAULT_SONNET_MODEL: "claude-sonnet-4-6",
+        ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-4-8",
+      },
+    },
+    category: "aggregator",
+    icon: "opencode",
+    iconColor: "#D4915D",
+  },
+  {
+    name: "OpenCode Zen (Responses)",
+    websiteUrl: "https://opencode.ai/zen",
+    apiKeyUrl: "https://opencode.ai/zen",
+    settingsConfig: {
+      env: {
+        ANTHROPIC_BASE_URL: "https://opencode.ai/zen/v1",
+        ANTHROPIC_AUTH_TOKEN: "",
+        ANTHROPIC_MODEL: "gpt-5.5",
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: "gpt-5.4-nano",
+        ANTHROPIC_DEFAULT_SONNET_MODEL: "gpt-5.5",
+        ANTHROPIC_DEFAULT_OPUS_MODEL: "gpt-5.5-pro",
+      },
+    },
+    category: "aggregator",
+    apiFormat: "openai_responses",
+    icon: "opencode",
+    iconColor: "#00A67E",
+    templateValues: {
+      apiKey: {
+        label: "Zen API Key",
+        placeholder: "zen-...",
+        editorValue: "",
+      },
+    },
+  },
 ];

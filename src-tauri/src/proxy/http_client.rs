@@ -224,7 +224,9 @@ fn build_client(proxy_url: Option<&str>) -> Result<Client, String> {
         .no_gzip()
         .no_brotli()
         .no_deflate()
-        .no_zstd();
+        .no_zstd()
+        // 设置默认 User-Agent，防止 Cloudflare 等 CDN 拦截没有 UA 的请求（如 OpenCode Zen 返回 403 error 1010）
+        .user_agent("Mozilla/5.0 (compatible; cc-switch/1.0)");
 
     // 有代理地址则使用代理，否则跟随系统代理
     if let Some(url) = proxy_url {
