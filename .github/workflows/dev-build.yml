@@ -1,0 +1,136 @@
+name: Dev Build (Unsigned)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'dev-*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dev-build-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            artifact: windows-x64
+          - os: macos-14
+            artifact: macos-arm64
+          - os: ubuntu-22.04
+            artifact: linux-x64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add macOS targets
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl wget file patchelf \
+            libssl-dev rpm libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
+          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
+            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.12.3
+          run_install: false
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (unsigned)
+        shell: bash
+        run: |
+          # Build without signing
+          export TAURI_SIGNING_PRIVATE_KEY=""
+          export CI=true
+          npx tauri build --bundles deb,appimage,dmg,nsis 2>&1 || {
+            echo "⚠️ Bundling failed, trying just the binary..."
+            cargo build --release --manifest-path src-tauri/Cargo.toml
+          }
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          # macOS
+          find src-tauri/target/release/bundle -name "*.dmg" -exec cp {} release-assets/ \; 2>/dev/null || true
+          # Windows
+          find src-tauri/target/release/bundle -name "*.msi" -o -name "*.exe" | grep -i installer | while read f; do cp "$f" release-assets/; done 2>/dev/null || true
+          # Linux
+          find src-tauri/target/release/bundle -name "*.deb" -o -name "*.AppImage" | while read f; do cp "$f" release-assets/; done 2>/dev/null || true
+          # Fallback: just the binary
+          if [ -z "$(ls -A release-assets 2>/dev/null)" ]; then
+            case "${{ runner.os }}" in
+              macOS)   cp src-tauri/target/release/cc-switch release-assets/cc-switch-macos-arm64 ;;
+              Windows) cp src-tauri/target/release/cc-switch.exe release-assets/cc-switch-windows-x64.exe ;;
+              Linux)   cp src-tauri/target/release/cc-switch release-assets/cc-switch-linux-x64 ;;
+            esac
+          fi
+          echo "Artifacts:"
+          ls -la release-assets/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: cc-switch-${{ matrix.artifact }}
+          path: release-assets/*
+
+  publish:
+    name: Create Release
+    runs-on: ubuntu-22.04
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/dev-')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Dev Build ${{ github.ref_name }}"
+          body: |
+            ## Dev Build (Unsigned)
+
+            OpenCode Zen 适配版本。
+
+            ### 修改内容
+            - 添加 OpenCode Zen 供应商预设（Chat/Messages/Responses）
+            - 添加 Zen 模型变体（DeepSeek V4 Flash Free 等）
+            - 修复 User-Agent header 防止 Cloudflare 403
+            - 支持 Claude Code / OpenCode / Codex / Gemini 多应用
+
+            ⚠️ 这是未签名版本，macOS 首次启动需右键打开。
+          files: release-assets/*
+          draft: false
+          prerelease: true
