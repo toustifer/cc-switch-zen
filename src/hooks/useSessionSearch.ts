@@ -1,5 +1,4 @@
 import { useCallback, useMemo } from "react";
-import FlexSearch from "flexsearch";
 import type { SessionMeta } from "@/types";
 
 interface UseSessionSearchOptions {
@@ -11,10 +10,11 @@ interface UseSessionSearchResult {
   search: (query: string) => SessionMeta[];
 }
 
-/**
- * 使用 FlexSearch 实现会话全文搜索
- * 索引会话元数据（标题、摘要、项目目录等）
- */
+interface SearchableSession {
+  session: SessionMeta;
+  haystack: string;
+}
+
 export function useSessionSearch({
   sessions,
   providerFilter,
@@ -24,14 +24,10 @@ export function useSessionSearch({
     return sessions.filter((s) => s.providerId === providerFilter);
   }, [sessions, providerFilter]);
 
-  const index = useMemo(() => {
-    const nextIndex = new FlexSearch.Index({
-      tokenize: "full",
-      resolution: 9,
-    });
-
-    filteredByProvider.forEach((session, idx) => {
-      const metaContent = [
+  const searchableSessions = useMemo<SearchableSession[]>(() => {
+    return filteredByProvider.map((session) => ({
+      session,
+      haystack: [
         session.sessionId,
         session.title,
         session.summary,
@@ -39,17 +35,14 @@ export function useSessionSearch({
         session.sourcePath,
       ]
         .filter(Boolean)
-        .join(" ");
-
-      nextIndex.add(idx, metaContent);
-    });
-
-    return nextIndex;
+        .join(" ")
+        .toLowerCase(),
+    }));
   }, [filteredByProvider]);
 
   const search = useCallback(
     (query: string): SessionMeta[] => {
-      const needle = query.trim();
+      const needle = query.trim().toLowerCase();
 
       if (!needle) {
         return [...filteredByProvider].sort((a, b) => {
@@ -59,13 +52,24 @@ export function useSessionSearch({
         });
       }
 
-      const results = index.search(needle, {
-        limit: filteredByProvider.length,
-      }) as number[];
+      return searchableSessions
+        .map(({ session, haystack }) => ({
+          session,
+          matchIndex: haystack.indexOf(needle),
+        }))
+        .filter(({ matchIndex }) => matchIndex !== -1)
+        .sort((a, b) => {
+          if (a.matchIndex !== b.matchIndex) {
+            return a.matchIndex - b.matchIndex;
+          }
 
-      return results.map((idx) => filteredByProvider[idx]);
+          const aTs = a.session.lastActiveAt ?? a.session.createdAt ?? 0;
+          const bTs = b.session.lastActiveAt ?? b.session.createdAt ?? 0;
+          return bTs - aTs;
+        })
+        .map(({ session }) => session);
     },
-    [index, filteredByProvider],
+    [filteredByProvider, searchableSessions],
   );
 
   return { search };
