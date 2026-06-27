@@ -218,14 +218,36 @@ fn macos_tray_icon() -> Option<Image<'static>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // ============================================================
+    // 阶段 0：早期诊断 banner（任何 logging sink 初始化之前）
+    //
+    // 目标：app 一启动就在 stderr + ~/.cc-switch/early-boot.log 留下痕迹。
+    // 如果这里都没出现，说明进程根本没跑到 main（被启动器 / Gatekeeper 拦截）。
+    // 如果这里出现了但下面没继续往下走，说明 panic 在早期阶段。
+    // ============================================================
+    panic_hook::early_log(
+        "boot",
+        &format!(
+            "cc_switch_lib::run() entered, version={}, pid={}",
+            env!("CARGO_PKG_VERSION"),
+            std::process::id()
+        ),
+    );
+
     // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log（默认 ~/.cc-switch/crash.log）
     panic_hook::setup_panic_hook();
+    panic_hook::early_log("boot", "panic hook installed");
 
     let mut builder = tauri::Builder::default();
+    panic_hook::early_log("boot", "tauri builder created");
 
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            panic_hook::early_log(
+                "single-instance",
+                &format!("callback fired with {} args", args.len()),
+            );
             log::info!("=== Single Instance Callback Triggered ===");
             log::debug!("Args count: {}", args.len());
             for (i, arg) in args.iter().enumerate() {
@@ -309,13 +331,77 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            let _ = rustls::crypto::ring::default_provider().install_default();
+            panic_hook::early_log("setup", "setup hook entered");
 
-            // 预先刷新 Store 覆盖配置，确保后续路径读取正确（日志/数据库等）
+            // 1) 先初始化 app_config_dir，early_log 才能落到正确路径
             app_store::refresh_app_config_dir_override(app.handle());
             panic_hook::init_app_config_dir(crate::config::get_app_config_dir());
+            panic_hook::early_log(
+                "setup",
+                &format!(
+                    "app_config_dir resolved to: {}",
+                    crate::config::get_app_config_dir().display()
+                ),
+            );
             #[cfg(target_os = "windows")]
             set_windows_app_user_model_id(app.handle());
+
+            // 2) 立即初始化 tauri-plugin-log，让所有后续 log::info! 落到 ~/.cc-switch/logs/cc-switch.log
+            //
+            // 关键：必须在 rustls::crypto::ring::default_provider().install_default() 之前。
+            // 因为如果 install_default 因为已被别的代码初始化过而 panic，
+            // 这一刻 crash.log 会记录 panic 信息，但我们要的是 panic 之前的日志上下文。
+            {
+                use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
+
+                let log_dir = panic_hook::get_log_dir();
+
+                if let Err(e) = std::fs::create_dir_all(&log_dir) {
+                    eprintln!("创建日志目录失败: {e}");
+                }
+
+                // 单文件覆盖效果：启动时删除旧日志
+                let log_file_path = log_dir.join("cc-switch.log");
+                let _ = std::fs::remove_file(&log_file_path);
+
+                app.handle().plugin(
+                    tauri_plugin_log::Builder::default()
+                        .level(log::LevelFilter::Trace)
+                        .targets([
+                            Target::new(TargetKind::Stdout),
+                            Target::new(TargetKind::Folder {
+                                path: log_dir,
+                                file_name: Some("cc-switch".into()),
+                            }),
+                        ])
+                        .rotation_strategy(RotationStrategy::KeepSome(2))
+                        .max_file_size(1024 * 1024 * 1024)
+                        .timezone_strategy(TimezoneStrategy::UseLocal)
+                        .build(),
+                )?;
+                panic_hook::early_log("setup", "tauri-plugin-log initialized");
+            }
+
+            // 3) 现在才安装 rustls 默认 provider。
+            // 这个调用如果被重复触发会直接 panic（错误信息：
+            // "default provider already set"）——这是 dev-1.0.5 在 Stifer Mac 上
+            // "打开一下退出一下"最可能的嫌疑之一。
+            //
+            // 用 catch_unwind 包住：万一 panic，落到 panic_hook 写出 backtrace，
+            // 应用优雅退出而不是显示一个 OS 弹窗后被 kill。
+            panic_hook::early_log("setup", "before rustls install_default");
+            if std::panic::catch_unwind(|| {
+                let _ = rustls::crypto::ring::default_provider().install_default();
+            })
+            .is_err()
+            {
+                panic_hook::early_log(
+                    "setup",
+                    "rustls install_default PANIC caught — proceeding without default provider",
+                );
+                log::error!("rustls install_default 触发 panic，已忽略（可能已被其它代码初始化）");
+            }
+            panic_hook::early_log("setup", "after rustls install_default");
 
             // 注册 Updater 插件（桌面端）
             #[cfg(desktop)]
@@ -328,42 +414,7 @@ pub fn run() {
                     log::warn!("初始化 Updater 插件失败，已跳过：{e}");
                 }
             }
-            // 初始化日志（单文件输出到 <app_config_dir>/logs/cc-switch.log）
-            {
-                use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
-
-                let log_dir = panic_hook::get_log_dir();
-
-                // 确保日志目录存在
-                if let Err(e) = std::fs::create_dir_all(&log_dir) {
-                    eprintln!("创建日志目录失败: {e}");
-                }
-
-                // 启动时删除旧日志文件，实现单文件覆盖效果
-                let log_file_path = log_dir.join("cc-switch.log");
-                let _ = std::fs::remove_file(&log_file_path);
-
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        // 初始化为 Trace，允许后续通过 log::set_max_level() 动态调整级别
-                        .level(log::LevelFilter::Trace)
-                        .targets([
-                            Target::new(TargetKind::Stdout),
-                            Target::new(TargetKind::Folder {
-                                path: log_dir,
-                                file_name: Some("cc-switch".into()),
-                            }),
-                        ])
-                        // 单文件模式：启动时删除旧文件，达到大小时轮转
-                        // 注意：KeepSome(n) 内部会做 n-2 运算，n=1 会导致 usize 下溢
-                        // KeepSome(2) 是最小安全值，表示不保留轮转文件
-                        .rotation_strategy(RotationStrategy::KeepSome(2))
-                        // 单文件大小限制 1GB
-                        .max_file_size(1024 * 1024 * 1024)
-                        .timezone_strategy(TimezoneStrategy::UseLocal)
-                        .build(),
-                )?;
-            }
+            panic_hook::early_log("setup", "updater plugin registered (or skipped)");
 
             // 注入 AppHandle 给 usage_events，让无 AppHandle 持有的写日志路径
             // 也能向前端推送 `usage-log-recorded`。
@@ -444,12 +495,20 @@ pub fn run() {
 
             let db = loop {
                 match crate::database::Database::init() {
-                    Ok(db) => break Arc::new(db),
+                    Ok(db) => {
+                        panic_hook::early_log("setup", "Database::init OK");
+                        break Arc::new(db);
+                    }
                     Err(e) => {
+                        panic_hook::early_log(
+                            "setup",
+                            &format!("Database::init failed: {e}"),
+                        );
                         log::error!("Failed to init database: {e}");
 
                         if !show_database_init_error_dialog(app.handle(), &db_path, &e.to_string())
                         {
+                            panic_hook::early_log("setup", "user chose exit from db init dialog");
                             log::info!("用户选择退出程序");
                             std::process::exit(1);
                         }
@@ -889,9 +948,11 @@ pub fn run() {
                 }
             });
             log::info!("✓ Deep-link URL handler registered");
+            panic_hook::early_log("setup", "deep-link handler registered");
 
             // 创建动态托盘菜单
             let menu = tray::create_tray_menu(app.handle(), &app_state)?;
+            panic_hook::early_log("setup", "tray menu created");
 
             // 构建托盘
             let mut tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID)
@@ -937,6 +998,7 @@ pub fn run() {
             }
 
             let _tray = tray_builder.build(app)?;
+            panic_hook::early_log("setup", "tray built");
             crate::services::webdav_auto_sync::start_worker(
                 app_state.db.clone(),
                 app.handle().clone(),
@@ -945,6 +1007,7 @@ pub fn run() {
                 app_state.db.clone(),
                 app.handle().clone(),
             );
+            panic_hook::early_log("setup", "webdav/s3 workers started");
             // 将同一个实例注入到全局状态，避免重复创建导致的不一致
             app.manage(app_state);
 
@@ -1167,6 +1230,7 @@ pub fn run() {
                     // 正常启动模式：显示窗口
                     let _ = window.show();
                     log::info!("正常启动模式：主窗口已显示");
+                    panic_hook::early_log("setup", "main window shown (visible mode)");
 
                     // Linux: 解决首次启动 UI 无响应问题（Tauri #10746 + wry #637）。
                     // 启动时 webview 未获取焦点 + surface 尺寸协商失败，导致点击无效。
@@ -1178,6 +1242,7 @@ pub fn run() {
                 }
             }
 
+            panic_hook::early_log("setup", "setup hook about to return Ok(())");
 
             Ok(())
         })

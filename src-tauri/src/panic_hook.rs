@@ -9,6 +9,38 @@ use std::panic;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+/// 一个早期可用的 stderr/file 写入工具，不依赖 `log` crate 或 tauri-plugin-log。
+///
+/// 之所以需要它：app 启动阶段（`cc_switch_lib::run()` 第一行、
+/// panic hook 内、setup 钩子早期）都还拿不到任何 logging sink，
+/// 但此时正是最容易出错的位置——rustls install_default 重复调用、
+/// rustls panic、tauri builder 早期 panic、main 早期 panic 等。
+/// `log::error!` 这时会静默丢失，所以这里用一个独立的、只走
+/// stderr + 兜底文件 的 logger，路径是 `~/.cc-switch/early-boot.log`，
+/// 持续追加，永远不删。
+pub fn early_log(stage: &str, msg: &str) {
+    // 立刻写 stderr，避免被 Tauri runtime 静默吞掉；不依赖任何 sink。
+    // macOS release 构建下 stderr 默认不显示，但 panic_hook 已经会写一份，
+    // 这里追加更多早期阶段的信息，让崩溃日志能区分"setup 没跑到"还是"setup 中段崩溃"。
+    let line = format!("[early-boot][{stage}] {msg}\n");
+    let mut stderr = std::io::stderr().lock();
+    let _ = stderr.write_all(line.as_bytes());
+    let _ = stderr.flush();
+
+    // 追加写到 ~/.cc-switch/early-boot.log，独立于 cc-switch.log 与 crash.log。
+    // crash.log 只在 panic 时写，而 setup 中段如果是干净的"主动 exit(0)"
+    // 路径，不会写 crash.log——所以单独维护一个早期 boot 日志，
+    // 让"打开就退"也能留下痕迹。
+    let path = get_app_config_dir().join("early-boot.log");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = file.write_all(line.as_bytes());
+        let _ = file.flush();
+    }
+}
+
 /// 应用版本号（从 Cargo.toml 读取）
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -178,6 +210,14 @@ Stack Trace (Backtrace)
 
         // 同时输出到 stderr（便于开发调试）
         eprintln!("{crash_entry}");
+        // 主动 flush，避免 macOS 上 stderr 走 line-buffered 时进程瞬间退出而丢内容
+        let _ = std::io::stderr().flush();
+
+        // 写一份早期 boot 日志，便于把 panic 时点和早期阶段串联起来
+        early_log(
+            "panic",
+            &format!("{message} @ {location}"),
+        );
 
         // 调用默认 hook
         default_hook(panic_info);
