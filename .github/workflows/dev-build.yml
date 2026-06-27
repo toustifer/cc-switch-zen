@@ -68,20 +68,28 @@ jobs:
       - name: Build (unsigned)
         shell: bash
         run: |
-          # Build without signing
-          export TAURI_SIGNING_PRIVATE_KEY=""
-          export CI=true
-          npx tauri build --bundles deb,appimage,dmg,nsis 2>&1 || {
-            echo "⚠️ Bundling failed, trying just the binary..."
-            cargo build --release --manifest-path src-tauri/Cargo.toml
-          }
+          case "${{ runner.os }}" in
+            macOS)
+              # Build .app only (no signed .dmg needed)
+              npx tauri build --bundles app 2>&1
+              ;;
+            Windows)
+              npx tauri build --bundles nsis 2>&1
+              ;;
+            Linux)
+              npx tauri build --bundles deb,appimage 2>&1
+              ;;
+          esac
 
       - name: Collect artifacts
         shell: bash
         run: |
           mkdir -p release-assets
-          # macOS
-          find src-tauri/target/release/bundle -name "*.dmg" -exec cp {} release-assets/ \; 2>/dev/null || true
+          # macOS: zip the .app bundle
+          find src-tauri/target/release/bundle -name "*.app" -type d | while read app; do
+            ditto -c -k --keepParent "$app" "release-assets/cc-switch-macos-arm64.zip"
+            echo "Zipped .app: $app"
+          done 2>/dev/null || true
           # Windows
           find src-tauri/target/release/bundle -name "*.msi" -o -name "*.exe" | grep -i installer | while read f; do cp "$f" release-assets/; done 2>/dev/null || true
           # Linux
